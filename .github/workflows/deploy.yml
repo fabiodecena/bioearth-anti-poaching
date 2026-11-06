@@ -1,4 +1,4 @@
-name: BioEarth Local Container CI/CD
+name: BioEarth EC2 CI/CD
 
 on:
   push:
@@ -6,8 +6,11 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
 jobs:
-  validate-build-and-smoke-test:
+  validate-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -34,12 +37,12 @@ jobs:
           IMAGE_TAG: bioearth-anti-poaching:${{ github.sha }}
         run: docker build --tag "$IMAGE_TAG" .
 
-      - name: Start container
+      - name: Start local validation container
         env:
           IMAGE_TAG: bioearth-anti-poaching:${{ github.sha }}
-        run: docker run --detach --rm --name bioearth-app --publish 8080:8080 "$IMAGE_TAG"
+        run: docker run --detach --rm --name bioearth-ci-app --publish 8080:8080 "$IMAGE_TAG"
 
-      - name: Run container smoke tests
+      - name: Run local smoke tests
         run: |
           for attempt in {1..10}; do
             if curl --fail --silent --show-error http://localhost:8080/health; then
@@ -50,9 +53,134 @@ jobs:
             fi
             sleep 2
           done
-          docker logs bioearth-app
+          docker logs bioearth-ci-app
           exit 1
 
-      - name: Stop container
+      - name: Stop local validation container
         if: always()
-        run: docker stop bioearth-app
+        run: docker stop bioearth-ci-app
+
+  deploy-to-ec2:
+    needs: validate-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+      CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify deployment configuration
+        run: |
+          test -n "$AWS_REGION"
+          test -n "$ECR_REPOSITORY"
+          test -n "$EC2_INSTANCE_ID"
+          test -n "$CONTAINER_NAME"
+          test -n "${{ vars.AWS_ROLE_ARN }}"
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build --tag "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      - name: Deploy image through Systems Manager
+        id: deploy
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              \"set -eu\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}\",
+              \"docker pull $IMAGE_URI\",
+              \"docker rm --force $CONTAINER_NAME 2>/dev/null || true\",
+              \"docker run --detach --restart unless-stopped --name $CONTAINER_NAME --publish 8080:8080 $IMAGE_URI\",
+              \"sleep 5\",
+              \"curl --fail --silent http://localhost:8080/health\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)
+          echo "COMMAND_ID=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for EC2 deployment
+        run: |
+          for attempt in {1..30}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "${{ steps.deploy.outputs.COMMAND_ID }}" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query "Status" \
+              --output text)
+            echo "SSM status: $STATUS"
+            case "$STATUS" in
+              Success)
+                aws ssm get-command-invocation \
+                  --command-id "${{ steps.deploy.outputs.COMMAND_ID }}" \
+                  --instance-id "$EC2_INSTANCE_ID" \
+                  --query "StandardOutputContent" \
+                  --output text
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut|Cancelling)
+                aws ssm get-command-invocation \
+                  --command-id "${{ steps.deploy.outputs.COMMAND_ID }}" \
+                  --instance-id "$EC2_INSTANCE_ID" \
+                  --query "{stdout:StandardOutputContent,stderr:StandardErrorContent}" \
+                  --output json
+                exit 1
+                ;;
+            esac
+            sleep 2
+          done
+          echo "Timed out waiting for the SSM deployment command."
+          exit 1
+
+      - name: Verify deployed container through SSM
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"curl --fail --silent http://localhost:8080/health\"]" \
+            --query "Command.CommandId" \
+            --output text)
+          for attempt in {1..15}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query "Status" \
+              --output text)
+            if [ "$STATUS" = "Success" ]; then
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --query "StandardOutputContent" \
+                --output text
+              exit 0
+            fi
+            if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "TimedOut" ]; then
+              exit 1
+            fi
+            sleep 2
+          done
+          exit 1

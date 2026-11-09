@@ -8,7 +8,7 @@ def home():
 
 @app.route("/health")
 def health():
-    return {"status": "ok"}, 200
+    return {"status": "ok", "version": "v3"}, 200
 
 
 if __name__ == "__main__":

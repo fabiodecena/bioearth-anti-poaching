@@ -29,7 +29,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p metrics
-          echo "WORKFLOW_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          workflow_started_epoch="$(date +%s)"
+          echo "WORKFLOW_STARTED_EPOCH=$workflow_started_epoch" >> "$GITHUB_ENV"
           cat > metrics/deployment.json <<EOF
           {
             "workflow": "${GITHUB_WORKFLOW}",
@@ -37,7 +38,11 @@ jobs:
             "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "commit_sha": "${GITHUB_SHA}",
             "event": "${GITHUB_EVENT_NAME}",
-            "status": "started"
+            "status": "started",
+            "deployment_status": "started",
+            "rollback": false,
+            "failure_class": null,
+            "workflow_started_epoch": $workflow_started_epoch
           }
           EOF
 
@@ -86,6 +91,7 @@ jobs:
         id: deploy
         run: |
           set -euo pipefail
+          echo "DEPLOYMENT_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           command_id="$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
@@ -141,19 +147,28 @@ jobs:
         run: |
           set -euo pipefail
           finished_epoch="$(date +%s)"
-          duration="$((finished_epoch - WORKFLOW_STARTED_EPOCH))"
+          workflow_duration="$((finished_epoch - WORKFLOW_STARTED_EPOCH))"
+          deployment_duration="$((finished_epoch - DEPLOYMENT_STARTED_EPOCH))"
           commit_timestamp="$(git show -s --format=%cI "$GITHUB_SHA")"
+          commit_timestamp_epoch="$(date -d "$commit_timestamp" +%s)"
+          lead_time="$((finished_epoch - commit_timestamp_epoch))"
           jq \
             --arg status "success" \
             --arg commit_timestamp "$commit_timestamp" \
             --arg image_uri "${IMAGE_URI:-}" \
             --argjson finished_epoch "$finished_epoch" \
-            --argjson duration "$duration" \
+            --argjson workflow_duration "$workflow_duration" \
+            --argjson deployment_duration "$deployment_duration" \
+            --argjson lead_time "$lead_time" \
             '.status = $status
+             | .deployment_status = $status
              | .commit_timestamp = $commit_timestamp
              | .finished_epoch = $finished_epoch
              | .deployment_finished_epoch = $finished_epoch
-             | .build_test_deploy_duration_seconds = $duration
+             | .workflow_finished_epoch = $finished_epoch
+             | .build_test_deploy_duration_seconds = $workflow_duration
+             | .deployment_duration_seconds = $deployment_duration
+             | .lead_time_seconds = $lead_time
              | .image_uri = $image_uri' \
             metrics/deployment.json > metrics/deployment.tmp
           mv metrics/deployment.tmp metrics/deployment.json
@@ -164,14 +179,17 @@ jobs:
         run: |
           set -euo pipefail
           finished_epoch="$(date +%s)"
-          duration="$((finished_epoch - WORKFLOW_STARTED_EPOCH))"
+          workflow_duration="$((finished_epoch - WORKFLOW_STARTED_EPOCH))"
           jq \
             --arg status "failure" \
             --argjson finished_epoch "$finished_epoch" \
-            --argjson duration "$duration" \
+            --argjson workflow_duration "$workflow_duration" \
             '.status = $status
+             | .deployment_status = $status
              | .finished_epoch = $finished_epoch
-             | .build_test_deploy_duration_seconds = $duration' \
+             | .workflow_finished_epoch = $finished_epoch
+             | .build_test_deploy_duration_seconds = $workflow_duration
+             | .failure_class = "pipeline_or_deployment_failure"' \
             metrics/deployment.json > metrics/deployment.tmp
           mv metrics/deployment.tmp metrics/deployment.json
 

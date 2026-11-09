@@ -68,18 +68,18 @@ jobs:
           docker pull "\$GOOD_IMAGE"
           failure_epoch=\$(date +%s)
           docker rm --force "\$CONTAINER" 2>/dev/null || true
-          docker run --detach --restart no --name "\$CONTAINER" --publish 8080:8080 "\$GOOD_IMAGE" sh -c 'exit 1'
+          docker run --detach --restart no --name "\$CONTAINER" --publish 8080:8080 --entrypoint /bin/sh "\$GOOD_IMAGE" -c 'exit 1'
           sleep 3
           if curl --fail --silent http://localhost:8080/health >/dev/null; then
             echo "FAILURE_NOT_OBSERVED"
             exit 1
           fi
+          echo "FAILURE_EPOCH=\$failure_epoch"
           docker rm --force "\$CONTAINER" 2>/dev/null || true
           docker run --detach --restart unless-stopped --name "\$CONTAINER" --publish 8080:8080 "\$GOOD_IMAGE"
           for attempt in \$(seq 1 15); do
             if curl --fail --silent http://localhost:8080/health >/dev/null; then
               recovery_epoch=\$(date +%s)
-              echo "FAILURE_EPOCH=\$failure_epoch"
               echo "RECOVERY_EPOCH=\$recovery_epoch"
               echo "MTTR_SECONDS=\$((recovery_epoch - failure_epoch))"
               exit 0

@@ -2,6 +2,11 @@ from flask import Flask
 
 app = Flask(__name__)
 
+@app.after_request
+def add_release_header(response):
+    response.headers["X-BioEarth-Release"] = "release-6"
+    return response
+
 @app.route("/")
 def home():
     return "Protect Wildlife!!! v5"

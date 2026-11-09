@@ -8,6 +8,7 @@ def test_home():
 
     assert response.status_code == 200
     assert response.data == b"Protect Wildlife!!! v5"
+    assert response.headers["X-BioEarth-Release"] == "release-6"
 
 
 def test_health():

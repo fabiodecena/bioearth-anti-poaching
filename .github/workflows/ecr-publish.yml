@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Initialize metrics
         shell: bash
         run: |
@@ -35,9 +38,6 @@ jobs:
             "status": "started"
           }
           EOF
-
-      - name: Checkout code
-        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5

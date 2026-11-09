@@ -7,7 +7,7 @@ def test_home():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert response.data == b"Protect Wildlife!!! v2"
+    assert response.data == b"Protect Wildlife!!! v5"
 
 
 def test_health():

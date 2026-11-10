@@ -5,6 +5,12 @@ on:
     workflows: ["BioEarth CI"]
     types: [completed]
     branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA of the validated image to deploy"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,20 +21,27 @@ env:
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
   CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
-  IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+  IMAGE_TAG: >-
+    ${{ github.event_name == 'workflow_run' &&
+        github.event.workflow_run.head_sha ||
+        inputs.commit_sha }}
 
 jobs:
   deploy:
     if: >-
-      ${{ github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.event == 'push' }}
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: >-
+            ${{ github.event_name == 'workflow_run' &&
+                github.event.workflow_run.head_sha ||
+                inputs.commit_sha }}
 
       - name: Initialize metrics
         shell: bash
